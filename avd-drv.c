@@ -21,6 +21,11 @@
 #include "avd.h"
 #include "avd-regs.h"
 
+bool avd_inst_dma_words = true;
+module_param_named(inst_dma_words, avd_inst_dma_words, bool, 0644);
+MODULE_PARM_DESC(inst_dma_words,
+		 "push the firmware-traced DMA config words on T8103 instead of zeros (default: Y)");
+
 void fill_rvra(struct avd_rvra *rvra, enum avd_image_fmt image_fmt,
 		u32 width, u32 height)
 {
