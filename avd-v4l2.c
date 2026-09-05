@@ -922,7 +922,10 @@ const struct vb2_ops avd_queue_ops = {
 };
 
 #define COHPROBE_LEN (2u << 20)
-static unsigned long cohprobe_frames, cohprobe_stale, cohprobe_bytes_diff;
+static unsigned long cohprobe_frames, cohprobe_stale, cohprobe_bytes_diff, cohprobe_xcpu;
+static int cohprobe_pre_cpu = -1;
+struct cohprobe_args { u8 *va; u64 a, b; unsigned long diff; };
+static u8 cohprobe_snap[COHPROBE_LEN];
 static u64 cohprobe_sum(const u8 *p, size_t n)
 {
 	const u64 *q = (const u64 *)p; u64 s = 0; size_t i;
@@ -936,33 +939,48 @@ static void cohprobe_civac(const u8 *p, size_t n)
 		asm volatile("dc civac, %0" :: "r"(p + i) : "memory");
 	asm volatile("dsb sy" ::: "memory");
 }
+static void cohprobe_compare(void *p)
+{
+	struct cohprobe_args *args = p; size_t i;
+	memcpy(cohprobe_snap, args->va, COHPROBE_LEN);   /* through the caches */
+	args->a = cohprobe_sum(cohprobe_snap, COHPROBE_LEN);
+	cohprobe_civac(args->va, COHPROBE_LEN);          /* drop the lines */
+	args->b = cohprobe_sum(args->va, COHPROBE_LEN);  /* fresh from DRAM */
+	args->diff = 0;
+	if (args->a != args->b)
+		for (i = 0; i < COHPROBE_LEN; i++) args->diff += cohprobe_snap[i] != args->va[i];
+}
 /* before the decode: pull the first 2 MiB of the destination into the caches */
 void avd_cohprobe_pre(struct avd_ctx *ctx)
 {
 	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 	u8 *va = dst ? vb2_plane_vaddr(&dst->vb2_buf, 0) : NULL;
 	if (!va) { dev_info_ratelimited(ctx->dev->dev, "COHPROBE: no vaddr\n"); return; }
+	cohprobe_pre_cpu = get_cpu();
 	(void)cohprobe_sum(va, COHPROBE_LEN);
 	asm volatile("dsb sy" ::: "memory");
+	put_cpu();
 }
 /* after the decode: compare what the cached mapping shows with DRAM */
 static void avd_cohprobe_post(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
 {
 	u8 *va = dst ? vb2_plane_vaddr(&dst->vb2_buf, 0) : NULL;
-	u64 a, b; size_t i; unsigned long diff = 0;
-	static u8 snap[COHPROBE_LEN];
+	struct cohprobe_args args = { .va = va };
+	int cpu;
 	if (!va) return;
-	memcpy(snap, va, COHPROBE_LEN);        /* through the caches */
-	a = cohprobe_sum(snap, COHPROBE_LEN);
-	cohprobe_civac(va, COHPROBE_LEN);       /* drop the lines */
-	b = cohprobe_sum(va, COHPROBE_LEN);     /* fresh from DRAM */
-	if (a != b)
-		for (i = 0; i < COHPROBE_LEN; i++) diff += snap[i] != va[i];
+	/* run the cached-vs-DRAM comparison on the CPU that pulled the lines in */
+	cpu = get_cpu();
+	if (cohprobe_pre_cpu >= 0 && cohprobe_pre_cpu != cpu) {
+		cohprobe_xcpu++;
+		smp_call_function_single(cohprobe_pre_cpu, cohprobe_compare, &args, true);
+	} else
+		cohprobe_compare(&args);
+	put_cpu();
 	cohprobe_frames++;
-	if (a != b) { cohprobe_stale++; cohprobe_bytes_diff += diff; }
-	if (a != b || cohprobe_frames % 50 == 0)
-		dev_info(ctx->dev->dev, "COHPROBE: frame %lu stale=%s (%lu bytes differ) totals: stale %lu/%lu frames, %lu bytes\n",
-			 cohprobe_frames, a != b ? "YES" : "no", diff, cohprobe_stale, cohprobe_frames, cohprobe_bytes_diff);
+	if (args.a != args.b) { cohprobe_stale++; cohprobe_bytes_diff += args.diff; }
+	if (args.a != args.b || cohprobe_frames % 50 == 0)
+		dev_info(ctx->dev->dev, "COHPROBE: frame %lu stale=%s (%lu bytes differ) totals: stale %lu/%lu frames, %lu bytes, %lu cross-cpu (pre cpu %d, post cpu %d)\n",
+			 cohprobe_frames, args.a != args.b ? "YES" : "no", args.diff, cohprobe_stale, cohprobe_frames, cohprobe_bytes_diff, cohprobe_xcpu, cohprobe_pre_cpu, cpu);
 }
 
 void avd_job_finish_no_pm(struct avd_ctx *ctx, enum vb2_buffer_state result)
