@@ -263,6 +263,7 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->lock = &ctx->dev->vdev_lock;
 	src_vq->dev = ctx->dev->v4l2_dev.dev;
 	src_vq->supports_requests = true;
+	src_vq->allow_cache_hints = true;
 
 	ret = vb2_queue_init(src_vq);
 	if (ret)
@@ -270,7 +271,7 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 
 	dst_vq->bidirectional = true;
 	dst_vq->mem_ops = &vb2_dma_contig_memops;
-	dst_vq->dma_attrs = DMA_ATTR_NO_KERNEL_MAPPING;
+	dst_vq->dma_attrs = 0;
 	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	dst_vq->drv_priv = ctx;
@@ -279,6 +280,7 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->lock = &ctx->dev->vdev_lock;
 	dst_vq->dev = ctx->dev->v4l2_dev.dev;
+	dst_vq->allow_cache_hints = true;
 
 	return vb2_queue_init(dst_vq);
 }
