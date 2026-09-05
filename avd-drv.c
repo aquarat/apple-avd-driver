@@ -161,6 +161,8 @@ static void avd_watchdog_func(struct work_struct *work)
 
 	dev_err(avd->dev, "Frame processing timed out! Vp: %d (%02d)",
 		ctx->vp_slot, ctx->fifo_idx);
+	if (ctx->vp_slot != VP_SLOT_NONE)
+		avd_status(avd, ctx->vp_slot);
 
 	free_vp_slot(avd, ctx);
 	free_inst_slot(avd, ctx);
@@ -207,6 +209,8 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 		goto done;
 	} else {
 		dev_err(avd->dev, "H%d %02d error", status, ctx->fifo_idx);
+		if (ctx->vp_slot != VP_SLOT_NONE)
+			avd_status(avd, ctx->vp_slot);
 		/* let watchdog handle */
 		goto done;
 	}
