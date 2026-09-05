@@ -663,6 +663,10 @@ static int avd_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/* EXPERIMENT: equivalent of the DT property dma-coherent on the avd node */
+	avd->dev->dma_coherent = true;
+	dev_info(avd->dev, "EXPERIMENT: dma_coherent forced on\n");
+
 	ret = dma_set_mask_and_coherent(avd->dev,
 			DMA_BIT_MASK((avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
 
