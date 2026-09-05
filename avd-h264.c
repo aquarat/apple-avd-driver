@@ -20,6 +20,8 @@
 #include <media/v4l2-h264.h>
 #include <media/videobuf2-dma-contig.h>
 
+#include <linux/moduleparam.h>
+
 #include "avd.h"
 #include "avd-inst.h"
 
@@ -73,6 +75,11 @@ struct avd_h264_ctx {
 		struct avd_buf pipe_state;
 	} bufs;
 };
+
+static bool avd_h264_early_submit = true;
+module_param_named(h264_early_submit, avd_h264_early_submit, bool, 0644);
+MODULE_PARM_DESC(h264_early_submit,
+		 "write the H.264 decode command right after the instruction stream instead of after VP done (default: Y)");
 
 /* ffmpeg submits wrong timestamp, use first_mb_in_slice as a workaround */
 #define is_new_frame(sl) (sl->first_mb_in_slice == 0) /* (ctx->fh.m2m_ctx->new_frame) */
@@ -711,6 +718,28 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	schedule_delayed_work(&ctx->watchdog_work, msecs_to_jiffies(2000));
 
 	slice_size = stream_slice(ctx, &run);
+
+	/*
+	 * Write the decode command as soon as the instruction stream for the
+	 * slice is in the FIFO (eiln's m1n1 flow and the emulated Apple
+	 * firmware do this before waiting for anything). Waiting for the VP
+	 * done IRQ before kicking the PP serialises the two stages; on T8103
+	 * (no pipe_state) that appears to stall the VP on frames whose
+	 * residual output exceeds the internal buffering (high bitrate,
+	 * CABAC, >1080p) and ends in DECODE_STATUS_ERR.
+	 *
+	 * First slice of a frame: START flag; further slices: plain command
+	 * (same pattern as avd_hevc_submit()/avd_vp9_submit()).
+	 */
+	if (avd_h264_early_submit) {
+		writel_relaxed(0x2b000000
+			| (is_new_frame(run.slice_params) ?
+				(avd->variant->revision == 3 ? 0x100 : 0x200) : 0)
+			| (ctx->fifo_idx << 4)
+			| avd->variant->fifo_slots,
+			avd->ctrl + avd->variant->submit_offset);
+		ctx->submitted = true;
+	}
 
 	if (run.base.bufs.src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) {
 		if (avd->variant->revision == 3)

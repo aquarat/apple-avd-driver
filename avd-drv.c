@@ -166,6 +166,7 @@ static void avd_watchdog_func(struct work_struct *work)
 
 	free_vp_slot(avd, ctx);
 	free_inst_slot(avd, ctx);
+	ctx->submitted = false;
 
 	writel(0, avd->mbox + AVD_REG_MBOX_IRQ_ENABLE);
 	ret = avd_reset(avd);
@@ -200,10 +201,18 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 		state = VB2_BUF_STATE_DONE;
 
 		free_inst_slot(avd, ctx);
+		/* with an early submit the vp-done IRQ may still be pending */
+		if (ctx->submitted && ctx->vp_slot != VP_SLOT_NONE)
+			free_vp_slot(avd, ctx);
+		ctx->submitted = false;
 	} else if (status & 0x100) {
 		free_vp_slot(avd, ctx);
-		/* a vp is done, kick the pp and hope for the best */
-		if(ctx->coded_fmt_desc->ops->submit)
+		/*
+		 * a vp is done, kick the pp and hope for the best -- unless the
+		 * codec already submitted right after pushing the instruction
+		 * stream (the order the firmware-traced sequence uses).
+		 */
+		if (!ctx->submitted && ctx->coded_fmt_desc->ops->submit)
 			ctx->coded_fmt_desc->ops->submit(ctx);
 
 		goto done;

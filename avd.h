@@ -216,6 +216,9 @@ struct avd_ctx {
 
 	u8 fifo_idx;
 	u8 vp_slot;
+
+	/* codec already wrote the submit/decode command for this job */
+	bool submitted;
 };
 
 struct avd_buf {
