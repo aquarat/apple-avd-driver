@@ -921,8 +921,53 @@ const struct vb2_ops avd_queue_ops = {
 	.stop_streaming = avd_stop_streaming,
 };
 
+#define COHPROBE_LEN (2u << 20)
+static unsigned long cohprobe_frames, cohprobe_stale, cohprobe_bytes_diff;
+static u64 cohprobe_sum(const u8 *p, size_t n)
+{
+	const u64 *q = (const u64 *)p; u64 s = 0; size_t i;
+	for (i = 0; i < n / 8; i++) s += q[i] * (i + 1);
+	return s;
+}
+static void cohprobe_civac(const u8 *p, size_t n)
+{
+	size_t i;
+	for (i = 0; i < n; i += 64)
+		asm volatile("dc civac, %0" :: "r"(p + i) : "memory");
+	asm volatile("dsb sy" ::: "memory");
+}
+/* before the decode: pull the first 2 MiB of the destination into the caches */
+void avd_cohprobe_pre(struct avd_ctx *ctx)
+{
+	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	u8 *va = dst ? vb2_plane_vaddr(&dst->vb2_buf, 0) : NULL;
+	if (!va) { dev_info_ratelimited(ctx->dev->dev, "COHPROBE: no vaddr\n"); return; }
+	(void)cohprobe_sum(va, COHPROBE_LEN);
+	asm volatile("dsb sy" ::: "memory");
+}
+/* after the decode: compare what the cached mapping shows with DRAM */
+static void avd_cohprobe_post(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
+{
+	u8 *va = dst ? vb2_plane_vaddr(&dst->vb2_buf, 0) : NULL;
+	u64 a, b; size_t i; unsigned long diff = 0;
+	static u8 snap[COHPROBE_LEN];
+	if (!va) return;
+	memcpy(snap, va, COHPROBE_LEN);        /* through the caches */
+	a = cohprobe_sum(snap, COHPROBE_LEN);
+	cohprobe_civac(va, COHPROBE_LEN);       /* drop the lines */
+	b = cohprobe_sum(va, COHPROBE_LEN);     /* fresh from DRAM */
+	if (a != b)
+		for (i = 0; i < COHPROBE_LEN; i++) diff += snap[i] != va[i];
+	cohprobe_frames++;
+	if (a != b) { cohprobe_stale++; cohprobe_bytes_diff += diff; }
+	if (a != b || cohprobe_frames % 50 == 0)
+		dev_info(ctx->dev->dev, "COHPROBE: frame %lu stale=%s (%lu bytes differ) totals: stale %lu/%lu frames, %lu bytes\n",
+			 cohprobe_frames, a != b ? "YES" : "no", diff, cohprobe_stale, cohprobe_frames, cohprobe_bytes_diff);
+}
+
 void avd_job_finish_no_pm(struct avd_ctx *ctx, enum vb2_buffer_state result)
 {
+	avd_cohprobe_post(ctx, v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx));
 	if (ctx->coded_fmt_desc->ops->done) {
 		struct vb2_v4l2_buffer *src_buf, *dst_buf;
 

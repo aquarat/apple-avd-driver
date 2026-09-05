@@ -232,6 +232,7 @@ void avd_reset_decoded_fmt(struct avd_ctx *ctx);
 int avd_init_ctrls(struct avd_ctx *ctx);
 
 void avd_job_finish_no_pm(struct avd_ctx *ctx, enum vb2_buffer_state result);
+void avd_cohprobe_pre(struct avd_ctx *ctx);
 void avd_job_finish(struct avd_ctx *ctx, enum vb2_buffer_state result);
 
 void avd_run_preamble(struct avd_ctx *ctx, struct avd_run *run);

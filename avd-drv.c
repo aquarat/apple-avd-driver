@@ -239,6 +239,7 @@ static void avd_device_run(void *priv)
 		return;
 	}
 
+	avd_cohprobe_pre(ctx);
 	ret = desc->ops->run(ctx);
 	if (ret)
 		avd_job_finish(ctx, VB2_BUF_STATE_ERROR);
@@ -662,6 +663,11 @@ static int avd_probe(struct platform_device *pdev)
 		dev_err(avd->dev, "failed to load firmware: %d", ret);
 		return ret;
 	}
+
+	/* EXPERIMENT: pretend the device is IO-coherent (what the DT property
+	 * dma-coherent would do): cacheable dma_alloc mappings, no syncs. */
+	avd->dev->dma_coherent = true;
+	dev_info(avd->dev, "COHPROBE: dma_coherent forced on\n");
 
 	ret = dma_set_mask_and_coherent(avd->dev,
 			DMA_BIT_MASK((avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
