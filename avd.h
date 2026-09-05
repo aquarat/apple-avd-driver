@@ -279,6 +279,8 @@ static inline struct avd_ctx *file_to_ctx(struct file *filp)
 	return container_of(file_to_v4l2_fh(filp), struct avd_ctx, fh);
 }
 
+extern bool avd_t8103_extra_init;
+
 /* hw stuff */
 int avd_boot(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);

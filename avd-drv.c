@@ -26,6 +26,11 @@ module_param_named(inst_dma_words, avd_inst_dma_words, bool, 0644);
 MODULE_PARM_DESC(inst_dma_words,
 		 "push the firmware-traced DMA config words on T8103 instead of zeros (default: Y)");
 
+bool avd_t8103_extra_init = true;
+module_param_named(t8103_extra_init, avd_t8103_extra_init, bool, 0644);
+MODULE_PARM_DESC(t8103_extra_init,
+		 "write ctrl+0x40f4=0x1555 and ctrl+0x4110=0 after CM3 boot on T8103 as eiln's m1n1 init does (default: Y)");
+
 void fill_rvra(struct avd_rvra *rvra, enum avd_image_fmt image_fmt,
 		u32 width, u32 height)
 {

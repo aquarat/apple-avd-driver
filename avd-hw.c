@@ -61,6 +61,16 @@ int avd_boot(struct avd_dev *avd)
 	if (ret)
 		return ret;
 
+	/*
+	 * eiln's T8103 bring-up (m1n1 fw/avd/__init__.py, avd_dma_tunables_stage0)
+	 * writes these two after the DMA tunables the firmware applies at boot.
+	 * 0x1555 looks like a 2-bit field per instruction FIFO (7 FIFOs).
+	 */
+	if (avd->variant->revision == 3 && avd_t8103_extra_init) {
+		writel_relaxed(0x1555, avd->ctrl + 0x40f4);
+		writel_relaxed(0, avd->ctrl + 0x4110);
+	}
+
 	return 0;
 }
 
