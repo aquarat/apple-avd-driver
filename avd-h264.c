@@ -718,10 +718,17 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		else
 			reg = (0x1018 | ctx->vp_slot << 8);
 
-		/* seems to be take ~ slice_size / 16 us */
+		/*
+		 * The VP consumes roughly 16 bytes/us, so a fixed 1 ms limit
+		 * only covers slices up to ~16 KiB; a 1080p/1296p frame split
+		 * in 4-8 slices has 50-100 KiB slices and timed out here with
+		 * the parse counter still advancing. Scale the limit with the
+		 * slice size (4x margin) and keep 1 ms as the floor.
+		 */
 		ret = readl_poll_timeout(
 			avd->ctrl + reg, slice_parsed,
-			slice_parsed >= round_down(slice_size, 8), 5, 1000);
+			slice_parsed >= round_down(slice_size, 8), 5,
+			max_t(u32, 1000, slice_size / 4));
 
 		if (ret) {
 			dev_err(avd->dev, "VP%d: timed out (%02d)! size: %08x parsed: %08x",
