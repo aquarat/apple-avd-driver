@@ -29,6 +29,12 @@
 #define H264_FLAG_ENTROPY_CODING_MODE(v)	FIELD_PREP(BIT(20), !!(v))
 #define H264_FLAG_NOT_IDR(v)			FIELD_PREP(BIT(21), !!(v))
 
+/*
+ * hdr_2c bit 7: transform_8x8_mode_flag. Must be a boolean; passing the raw
+ * V4L2 flag value (0x40) through a 2-bit FIELD_PREP masks it to zero.
+ */
+#define H264_TRANSFORM_8X8_MODE(v)		FIELD_PREP(BIT(7), !!(v))
+
 
 struct avd_h264_run {
 	struct avd_run base;
@@ -216,7 +222,7 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 		| AVD_HDR_COMMON_BIT_DEPTH_C(sps->bit_depth_chroma_minus8)
 		| AVD_HDR_COMMON_MIN_LUMA_CBS(1)
 		| AVD_HDR_COMMON_LUMA_CBS(1)
-		| AVD_HDR_COMMON_LUMA_TBS(pps->flags & V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE)
+		| H264_TRANSFORM_8X8_MODE(pps->flags & V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE)
 		| AVD_HDR_COMMON_FLAG0(sps->flags & V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE),
 		"hdr_2c_sps_param");
 
