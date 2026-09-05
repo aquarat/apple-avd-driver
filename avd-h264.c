@@ -81,6 +81,8 @@ module_param_named(h264_early_submit, avd_h264_early_submit, bool, 0644);
 MODULE_PARM_DESC(h264_early_submit,
 		 "write the H.264 decode command right after the instruction stream instead of after VP done (default: Y)");
 
+static void avd_h264_submit(struct avd_ctx *ctx);
+
 /* ffmpeg submits wrong timestamp, use first_mb_in_slice as a workaround */
 #define is_new_frame(sl) (sl->first_mb_in_slice == 0) /* (ctx->fh.m2m_ctx->new_frame) */
 
@@ -720,24 +722,18 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	slice_size = stream_slice(ctx, &run);
 
 	/*
-	 * Write the decode command as soon as the instruction stream for the
-	 * slice is in the FIFO (eiln's m1n1 flow and the emulated Apple
-	 * firmware do this before waiting for anything). Waiting for the VP
-	 * done IRQ before kicking the PP serialises the two stages; on T8103
-	 * (no pipe_state) that appears to stall the VP on frames whose
-	 * residual output exceeds the internal buffering (high bitrate,
-	 * CABAC, >1080p) and ends in DECODE_STATUS_ERR.
-	 *
-	 * First slice of a frame: START flag; further slices: plain command
-	 * (same pattern as avd_hevc_submit()/avd_vp9_submit()).
+	 * Write the decode command as soon as the first slice of the frame
+	 * is in the instruction FIFO instead of waiting for the VP done IRQ.
+	 * Waiting serialises the VP and PP stages; on T8103 the VP then
+	 * stalls mid-frame (no error IRQ, "slice bytes parsed" stuck short of
+	 * the slice size) on frames whose residual output exceeds its
+	 * internal buffering (high bitrate, CABAC, >= 1080p). eiln's
+	 * hardware-verified T8103 H.264 flow writes exactly one command
+	 * (with the START flag) per frame right after the instruction words,
+	 * so do the same: one command per frame, none for further slices.
 	 */
-	if (avd_h264_early_submit) {
-		writel_relaxed(0x2b000000
-			| (is_new_frame(run.slice_params) ?
-				(avd->variant->revision == 3 ? 0x100 : 0x200) : 0)
-			| (ctx->fifo_idx << 4)
-			| avd->variant->fifo_slots,
-			avd->ctrl + avd->variant->submit_offset);
+	if (avd_h264_early_submit && is_new_frame(run.slice_params)) {
+		avd_h264_submit(ctx);
 		ctx->submitted = true;
 	}
 
