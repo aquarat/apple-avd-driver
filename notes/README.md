@@ -184,7 +184,7 @@ g_1080_high8x8 / t_1080p_high / camera-1296p-10s   still FAIL(hw-timeout), now 1
 ```
 Full table: `patched-results.txt`. Whether 1 is the right field value (vs. 2
 or 3, cf. HEVC's `log2_diff_max_min_luma_transform_block_size + ...` and VP9's
-`tx_mode`) should be checked against the m1n1/macOS traces in
+`tx_mode`) should be checked against the m1n1/macOS traces
 before proposing upstream, but bit-identical output on
 four 8x8 clips is strong evidence. The patch is NOT applied in `apple-avd/`
 (tree is pristine): `cd apple-avd && patch -p1 < ../patches/0001-*.patch && make && ../reload.sh`.
