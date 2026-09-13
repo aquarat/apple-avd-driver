@@ -14,79 +14,71 @@
 #include <linux/pm_runtime.h>
 #include <linux/iommu.h>
 #include <linux/reset.h>
+#include <linux/delay.h>
 
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-v4l2.h>
 
 #include "avd.h"
+#include "avd-inst.h"
 #include "avd-regs.h"
 
-void fill_rvra(struct avd_rvra *rvra, enum avd_image_fmt image_fmt,
-		u32 width, u32 height)
+static void calc_tile_meta(u32 w, u32 h, u32 bpb, u32 tile_dim,
+			   u32 meta_hdr_bytes, u32 *tile, u32 *meta)
 {
-	u32 size0, size1, size2;
-	u32 hs = round_up(height, 32);
+	u32 tiles_width, tiles_height, meta_tile_w, meta_tile_h, tile_bytes;
+	tiles_width = DIV_ROUND_UP(w, tile_dim);
+	tiles_height = DIV_ROUND_UP(h, tile_dim);
+	tile_bytes = tile_dim * tile_dim * DIV_ROUND_UP(bpb, 8);
+	*tile = ALIGN(tiles_width * tiles_height * tile_bytes, 16);
 
-	size0 = (width * hs) + ((width * hs) / 4);
-	size2 = size0;
+	meta_tile_w = roundup_pow_of_two(tiles_width);
+	meta_tile_h = roundup_pow_of_two(tiles_height);
 
-	switch (image_fmt) {
-	case AVD_IMG_FMT_420_8BIT:
-	case AVD_IMG_FMT_420_10BIT:
-		size2 /= 2;
-		break;
-	default:
-		break;
-	}
-
-	size1 = max((roundup_pow_of_two(width) * roundup_pow_of_two(height)) / 32,
-			 0x100u);
-	/* TODO: how big? */
-
-	rvra->size = round_up(size0 + size1 + size2, 0x4000);
-	rvra->size +=
-		(width < 1000 ? 0 : width < 1800 ? 2 : width < 3800 ? 3 : 9) * 0x4000;
-	/* TODO */
-	rvra->size +=
-		(height < 1000 ? 0 : height < 1800 ? 2 : height < 3800 ? 3 : 9) * 0x4000;
-
-	rvra->offsets[1] = 0;
-	rvra->offsets[0] = size0;
-	rvra->offsets[3] = size0 + size1;
-	rvra->offsets[2] = size0 + size1 + size2;
+	*meta = ALIGN(meta_tile_w * meta_tile_h * meta_hdr_bytes, 16);
 }
 
+void fill_comp(struct avd_comp *comp, enum avd_image_fmt image_fmt, u32 width,
+	       u32 height)
+{
+	u32 y_meta, y, uv_meta, uv;
+	int bit_depth;
 
-int alloc_slots(struct avd_dev *avd, struct avd_ctx *ctx, enum avd_codec codec) {
-	u32 free;
-	u32 offset = 0;
-	for (int i = 0; i < codec; i++)
-		offset += avd->variant->vp_slots[i];
-
-	free = find_next_zero_bit(&avd->vp_slots,
-			offset + avd->variant->vp_slots[codec],
-			offset);
-
-	if (free >= offset + avd->variant->vp_slots[codec])
-		return -ENOMEM;
-
-	set_bit(free, &avd->vp_slots);
-	ctx->vp_slot = free;
-
-	ctx->fifo_idx = find_first_zero_bit(&avd->inst_fifo_slots,
-			avd->variant->fifo_slots);
-
-	if (WARN_ON(ctx->fifo_idx >= avd->variant->fifo_slots)) {
-		clear_bit(free, &avd->vp_slots);
-		return -ENOMEM;
+	switch (image_fmt) {
+	case AVD_IMG_FMT_420_10BIT:
+	case AVD_IMG_FMT_422_10BIT:
+		bit_depth = 10;
+		break;
+	default:
+		bit_depth = 8;
+		break;
 	}
-	set_bit(ctx->fifo_idx,  &avd->inst_fifo_slots);
 
-	return 0;
+	/* y has 32x32 tiles and 32 bytes of metadata per tile */
+	calc_tile_meta(width, height, bit_depth, 32, 32, &y, &y_meta);
+	/* uv has 16x16 tiles and 8 bytes of metadata per tile */
+	calc_tile_meta(width / 2, height / 2, bit_depth * 2, 16, 8, &uv,
+		       &uv_meta);
+
+	/* output like DCP driver expects */
+	comp->offsets[0] = y;
+	comp->offsets[1] = 0;
+	comp->offsets[2] = y + y_meta + uv;
+	comp->offsets[3] = y + y_meta;
+
+	comp->size = y_meta + y + uv_meta + uv;
 }
 
 int avd_buf_alloc(struct avd_dev *avd, struct avd_buf *buf, size_t size)
 {
+	if (!buf->cpu && size < buf->size)
+		return 0;
+	else if (buf->cpu)
+		avd_buf_free(avd, buf);
+
+	if (size <= 0)
+		return -ENOMEM;
+
 	buf->size = size;
 	buf->cpu =
 		dma_alloc_coherent(avd->dev, buf->size, &buf->addr, GFP_KERNEL);
@@ -118,12 +110,89 @@ avd_get_ref_buf(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 	return vb2_to_avd_decoded_buf(buf);
 }
 
+static int avd_wait_submission_queue(struct avd_ctx *ctx, int vp)
+{
+	struct avd_dev *avd = ctx->dev;
+	u32 max = readl_relaxed(avd->ctrl +
+				avd->variant->submit_queue_max_offset + vp * 4);
+	u32 cur = readl_relaxed(
+		avd->ctrl + avd->variant->submit_queue_status_offset + vp * 4);
+
+	if (cur == max) {
+		dev_err(avd->dev, "instruction que full! %d/%d", cur, max);
+		return 1;
+	}
+
+	if (cur >= max / 2) {
+		/* TODO: to high? low? Has weird side effects??? */
+		usleep_range(500, 650);
+	}
+	return 0;
+}
+
+int avd_init_job(struct avd_ctx *ctx, enum avd_codec codec, size_t segments)
+{
+	int ret = 0;
+	struct avd_job *job = &ctx->job;
+
+	job->codec = codec;
+	job->num = 0;
+	job->segments = kzalloc(sizeof(*job->segments) * segments, GFP_KERNEL);
+	if (!job->segments)
+		ret = -ENOMEM;
+	return ret;
+}
+
+int avd_submit_job(struct avd_ctx *ctx)
+{
+	struct avd_dev *avd = ctx->dev;
+	struct avd_job *sub = &ctx->job;
+	struct avd_segment *seg;
+	int i, idx = 0, vp = 0;
+	void __iomem *reg;
+	u32 exec_mask = sub->codec == AVD_CODEC_VP9 &&
+					avd->variant->revision == 3 ?
+				AVD_OP_EXEC_REV3_VP9_MASK :
+				0;
+	u32 exec_rev_flag =
+		AVD_OP_EXEC_FLAG_START_REV4(avd->variant->revision == 4) |
+		AVD_OP_EXEC_FLAG_START_REV3(avd->variant->revision == 3);
+
+	ctx->fifo_idx = 0;
+	for (i = 0; i < sub->codec; i++)
+		vp += avd->variant->vp_slots[i];
+
+	schedule_delayed_work(&ctx->watchdog_work, msecs_to_jiffies(2000));
+	avd->variant->configure_stream(avd, ctx->inst.addr, ctx->fifo_idx, vp);
+	reg = avd->ctrl + avd->variant->vp_slot_offset + vp * 4;
+
+	/* the first segment is always the header (needs special handling) */
+
+	writel(AVD_OP_EXEC | exec_mask | exec_rev_flag |
+		       AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx),
+	       reg);
+	seg = &sub->segments[idx++];
+	for (i = 0; i < seg->num; i++)
+		writel(seg->instructions[i], reg);
+	for (; idx <= sub->num; idx++) {
+		seg = &sub->segments[idx];
+		for (i = 0; i < seg->num; i++)
+			writel(seg->instructions[i], reg);
+		if (avd_wait_submission_queue(ctx, vp))
+			break;
+		writel(AVD_OP_EXEC | exec_mask |
+			       AVD_OP_EXEC_FLAG_END(idx == sub->num),
+		       reg);
+	}
+
+	kfree(sub->segments);
+	sub->segments = NULL;
+	return 0;
+}
 
 static int avd_reset(struct avd_dev *avd)
 {
 	int ret = 0;
-	avd->vp_slots = 0;
-	avd->inst_fifo_slots = 0;
 
 	ret = pm_runtime_resume_and_get(avd->dev);
 	if (ret < 0)
@@ -159,11 +228,7 @@ static void avd_watchdog_func(struct work_struct *work)
 
 	avd = ctx->dev;
 
-	dev_err(avd->dev, "Frame processing timed out! Vp: %d (%02d)",
-		ctx->vp_slot, ctx->fifo_idx);
-
-	free_vp_slot(avd, ctx);
-	free_inst_slot(avd, ctx);
+	dev_err(avd->dev, "Frame processing timed out!");
 
 	writel(0, avd->mbox + AVD_REG_MBOX_IRQ_ENABLE);
 	ret = avd_reset(avd);
@@ -196,17 +261,13 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 	if (status & 0x1000) {
 		/* pp is done ! we are done */
 		state = VB2_BUF_STATE_DONE;
-
-		free_inst_slot(avd, ctx);
 	} else if (status & 0x100) {
-		free_vp_slot(avd, ctx);
 		/* a vp is done, kick the pp and hope for the best */
 		if(ctx->coded_fmt_desc->ops->submit)
 			ctx->coded_fmt_desc->ops->submit(ctx);
-
 		goto done;
 	} else {
-		dev_err(avd->dev, "H%d %02d error", status, ctx->fifo_idx);
+		dev_err(avd->dev, "H%d error", status);
 		/* let watchdog handle */
 		goto done;
 	}
@@ -266,7 +327,7 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 
 	dst_vq->bidirectional = true;
 	dst_vq->mem_ops = &vb2_dma_contig_memops;
-	dst_vq->dma_attrs = DMA_ATTR_NO_KERNEL_MAPPING;
+	dst_vq->dma_attrs = 0;
 	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	dst_vq->drv_priv = ctx;
@@ -290,6 +351,10 @@ static int avd_open(struct file *filp)
 		return -ENOMEM;
 
 	ctx->dev = avd;
+
+	ret = avd_buf_alloc(avd, &ctx->inst, fifo_size());
+	if (ret)
+		goto err_free_ctx;
 
 	INIT_DELAYED_WORK(&ctx->watchdog_work, avd_watchdog_func);
 
@@ -316,6 +381,7 @@ err_cleanup_m2m_ctx:
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 
 err_free_ctx:
+	avd_buf_free(avd, &ctx->inst);
 	kfree(ctx);
 	return ret;
 }
@@ -328,6 +394,7 @@ static int avd_release(struct file *filp)
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
+	avd_buf_free(ctx->dev, &ctx->inst);
 	kfree(ctx);
 
 	return 0;
@@ -529,7 +596,7 @@ static const struct avd_variant avd_t8122_variant = {
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,
 	.submit_queue_max_offset = 0x44,
-	.submit_queue_status_offset = 0x78, /* v4 and never have fixed offsets */
+	.submit_queue_status_offset = 0x7c, /* v4 and newer have fixed offsets */
 };
 
 static const struct avd_variant avd_t8140_variant = {
@@ -551,7 +618,7 @@ static const struct avd_variant avd_t8140_variant = {
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,
 	.submit_queue_max_offset = 0x44,
-	.submit_queue_status_offset = 0x78,
+	.submit_queue_status_offset = 0x7c,
 };
 
 static const struct avd_variant avd_t8132_variant = {
@@ -572,7 +639,7 @@ static const struct avd_variant avd_t8132_variant = {
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,
 	.submit_queue_max_offset = 0x44,
-	.submit_queue_status_offset = 0x78,
+	.submit_queue_status_offset = 0x7c,
 };
 
 /* can also be derived from a version register */
@@ -707,7 +774,7 @@ static void avd_remove(struct platform_device *pdev)
 	pm_runtime_dont_use_autosuspend(avd->dev);
 }
 
-static int avd_runtime_resume(struct device *dev)
+static __maybe_unused int avd_runtime_resume(struct device *dev)
 {
 	int ret;
 	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
@@ -718,7 +785,7 @@ static int avd_runtime_resume(struct device *dev)
 	return ret;
 }
 
-static int avd_runtime_suspend(struct device *dev)
+static __maybe_unused int avd_runtime_suspend(struct device *dev)
 {
 	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
 
@@ -744,3 +811,9 @@ module_platform_driver(avd_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Apple avd v4l2 sl m2m");
+MODULE_FIRMWARE("apple/avd-fw-v2-t0.bin");
+MODULE_FIRMWARE("apple/avd-fw-v3-t0.bin");
+MODULE_FIRMWARE("apple/avd-fw-v3-t1.bin");
+MODULE_FIRMWARE("apple/avd-fw-v4-t0.bin");
+MODULE_FIRMWARE("apple/avd-fw-v5-t0.bin");
+MODULE_FIRMWARE("apple/avd-fw-v5-t1.bin");
