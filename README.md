@@ -14,6 +14,7 @@ driver sources): `make` builds `apple-avd.ko` against the running kernel.
 | branch | contents |
 |---|---|
 | `main` (= `series`) | pristine driver + the recommended series: patches 0001-0006 and 0008 of `notes/patches/final/` |
+| **`series-7.1.13`** | driver from Fedora kernel-16k **7.1.13**-402.asahi + `notes/patches/final-7.1.13/` 0001-0004 (validated on an M1 Pro, T6000); see `notes/7.1.13/README.md` |
 | `readback` | `main` up to 0006 (cacheable capture buffers) |
 | `dma-coherent` | experiment: force `dev->dma_coherent` (what the RFC DT patch 0007 does) |
 | `coh-probe` | experiment: per-frame cache-coherency probe on top of `dma-coherent` |
@@ -30,3 +31,11 @@ kernel-path versions of the commits on `main` (plus the DT-only RFC 0007),
 `notes/patches/ffmpeg/` the matching FFmpeg patches (Kwiboo
 `v4l2-request-n8.1`). The test clips are not included; the scripts take the
 clip directory from `$RESEARCH`.
+
+## Kernel 7.1.13
+
+`series-7.1.13` is the branch to build on kernel-16k 7.1.13. The stock 7.1.13 driver already contains 0001-0003 of
+the 7.1.6 series, but has two bugs that make it unusable for long-running decodes: **every H.264 stream stops after
+4096 slices** (`slice_num` is never reset: "slice_num > 4096, stream was rejected!", then EBUSY), and a per-frame
+8.4 MB `kzalloc` drops frames when memory is fragmented. `notes/7.1.13/README.md` has the analysis, the port of 0008,
+the validation numbers and T6000 notes (firmware, device-node ordering).
